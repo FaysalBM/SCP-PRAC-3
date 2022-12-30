@@ -1,11 +1,11 @@
-#include<stdio.h>
-#include<stdlib.h>
-#include<math.h>
-#include<time.h>
 #include <stdio.h>
-#include<unistd.h>
+#include <stdlib.h>
+#include <math.h>
+#include <time.h>
+#include <stdio.h>
+#include <unistd.h>
 #include <pthread.h>
-#include<stdbool.h>
+#include <stdbool.h>
 #include <string.h>
 #ifdef D_GLFW_SUPPORT
 #include<GLFW/glfw3.h>
