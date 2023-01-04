@@ -1,12 +1,12 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <math.h>
-#include <time.h>
-#include <stdio.h>
-#include <unistd.h>
-#include <pthread.h>
-#include <stdbool.h>
-#include <string.h>
+#include<stdio.h>
+#include<stdlib.h>
+#include<math.h>
+#include<time.h>
+#include<stdio.h>
+#include<unistd.h>
+#include<pthread.h>
+#include<stdbool.h>
+#include<semaphore.h>
 #ifdef D_GLFW_SUPPORT
 #include<GLFW/glfw3.h>
 #endif
@@ -43,6 +43,7 @@ struct Node{
     double GCY;
 };
 
+
 struct thread_data{
     struct Node* node;
     double* shrdBuff;
@@ -55,13 +56,29 @@ struct forces_data{
     double *shrdBuff;
     double *localBuff;
     int index;
-    int MThreads;
 };
 typedef struct thread_data TNQueenJob, *MIJOB;
-typedef struct forces_data TNForcesJob, *MIFORCE;
+typedef struct forces_data TNForcesJob;
+
 void *buildTreeThread(MIJOB data);
-void *calculateForcesThread(MIFORCE data);
+void *calculateForcesThread();
+void createThreads(int n);
+
+TNForcesJob data_sem;
+int deletedPart = 0;
+int Mthreads;
+int id = 0;
+int inactivethreads = 0;
+
+pthread_t *GeneralThreads;
+pthread_mutex_t controlID = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t controlThreads = PTHREAD_MUTEX_INITIALIZER;
+sem_t semExCF;
+sem_t dataThread;
+sem_t semEnded;
+
 void buildTree(struct Node* node, double* shrdBuff, int *indexes, int n, int MThreads){
+
     pthread_t *MiTids = NULL;
     MIJOB data_thread = NULL;
     int Jobs=0, NewThreads=0, RemainingThreads=0, PendingThreads=0, CurrentJob=0;
@@ -114,11 +131,9 @@ void buildTree(struct Node* node, double* shrdBuff, int *indexes, int n, int MTh
                 NewThreads = MThreads;
             }
             RemainingThreads = MThreads - Jobs;
-
             if (RemainingThreads < 0) {
                 RemainingThreads = 0;
             }
-
             MiTids = malloc(sizeof(pthread_t)*NewThreads);
             if (MiTids==NULL)
                 perror("Error reservar Tids vector.");
@@ -144,7 +159,6 @@ void buildTree(struct Node* node, double* shrdBuff, int *indexes, int n, int MTh
             node->children[0]->LLY=node->GCY;
             node->children[0]->GCX=(node->GCX+node->TRX)/2;
             node->children[0]->GCY=(node->GCY+node->TRY)/2;
-
             //We build a tree in the new node, with the particles that are inside
 
             if(PendingThreads>0) {
@@ -178,8 +192,6 @@ void buildTree(struct Node* node, double* shrdBuff, int *indexes, int n, int MTh
             node->children[1]->LLY=node->GCY;
             node->children[1]->GCX=(node->LLX+node->GCX)/2;
             node->children[1]->GCY=(node->GCY+node->TRY)/2;
-
-
             if(PendingThreads>0 ){
                 data_thread[CurrentJob].indexes = NWi;
                 data_thread[CurrentJob].n = NWc;
@@ -210,7 +222,6 @@ void buildTree(struct Node* node, double* shrdBuff, int *indexes, int n, int MTh
             node->children[2]->LLY=node->LLY;
             node->children[2]->GCX=(node->LLX+node->GCX)/2;
             node->children[2]->GCY=(node->LLY+node->GCY)/2;
-
             if(PendingThreads > 0) {
 
                 data_thread[CurrentJob].indexes = SWi;
@@ -241,7 +252,6 @@ void buildTree(struct Node* node, double* shrdBuff, int *indexes, int n, int MTh
             node->children[3]->LLY=node->LLY;
             node->children[3]->GCX=(node->GCX+node->TRX)/2;
             node->children[3]->GCY=(node->LLY+node->GCY)/2;
-
             if(PendingThreads > 0)
             {
                 data_thread[CurrentJob].indexes = SEi;
@@ -289,12 +299,12 @@ void *buildTreeThread(MIJOB data)
     return NULL;
 }
 
-void calculateForce(struct Node *tree, double *shrdBuff, double *localBuff, int index, int MThreads){
+void calculateForce(struct Node *tree, double *shrdBuff, double *localBuff, int index){
+    printf("Entered calculate forces\n");
     double distance = sqrt((tree->CMX-shrdBuff[PX(index)])*(tree->CMX-shrdBuff[PX(index)])+
                            (tree->CMY-shrdBuff[PY(index)])*(tree->CMY-shrdBuff[PY(index)]));
-
     pthread_t *MiTids = NULL;
-    MIFORCE data_thread = NULL;
+    TNForcesJob data_thread;
     int Jobs=0, NewThreads=0, RemainingThreads=0, PendingThreads=0, CurrentJob=0;
     //First we check if the node is not actually the same particle we are calculating
     if(distance>0){
@@ -306,81 +316,56 @@ void calculateForce(struct Node *tree, double *shrdBuff, double *localBuff, int 
                 f=G*tree->mass/(rlimit*rlimit*distance);
             } else {
                 f=G*tree->mass/(distance*distance*distance);
-            }
+            } //mutex per localbuff
             localBuff[AX(index)]+=f*(tree->CMX-shrdBuff[PX(index)]);
             localBuff[AY(index)]+=f*(tree->CMY-shrdBuff[PY(index)]);
         } else {
             //If not, we recursively call the calculateForce() function in the children that are not empty.
             int i;
-
-            if(MThreads>0) {
-                Jobs = 0;
-                for(i=0;i<4;i++){
-                    if(tree->children[i]!=NULL){
-                        Jobs++;
-                    }
-                }
-
-                if (MThreads > Jobs) {
-                    NewThreads = Jobs;
-                } else {
-                    NewThreads = MThreads;
-                }
-                RemainingThreads = MThreads - Jobs;
-
-                if (RemainingThreads < 0) {
-                    RemainingThreads = 0;
-                }
-
-                MiTids = malloc(sizeof(pthread_t)*NewThreads);
-                if (MiTids==NULL)
-                    perror("Error reservar Tids vector.");
-
-                data_thread = malloc(sizeof(TNForcesJob)*NewThreads);
-                if (data_thread == NULL) {
-                    perror("Error reservar data vector.");
-                }
-                CurrentJob = 0;
-                PendingThreads = NewThreads;
-
-            }
-
             for(i=0;i<4;i++){
                 if(tree->children[i]!=NULL){
-                    if(PendingThreads>0) {
-                        data_thread[CurrentJob].index = index;
-                        data_thread[CurrentJob].MThreads = (RemainingThreads/PendingThreads);
-                        data_thread[CurrentJob].shrdBuff = shrdBuff;
-                        data_thread[CurrentJob].node = tree->children[i];
-                        data_thread[CurrentJob].localBuff = localBuff;
-                        if ((pthread_create(&(MiTids[CurrentJob]), NULL, (void *(*)(void *)) calculateForcesThread, (void *)&(data_thread[CurrentJob]))) !=
-                            0) {
-                            perror("Error crear hilo.");
-                        }
-                        RemainingThreads -= data_thread[CurrentJob].MThreads;
-                        PendingThreads--;
-                        CurrentJob++;
+                    printf("pso\n");
+                    pthread_mutex_lock(&controlThreads);
+                    if(inactivethreads > 0){
+                        printf("As theres threads doing nothing, we enter and set data to liberate the threads\n");
+                        sem_wait(&dataThread);
+                        printf("sdas\n");
+                        data_sem.index = index;
+                        data_sem.localBuff = localBuff;
+                        data_sem.shrdBuff = shrdBuff;
+                        data_sem.node = tree->children[i];
+                        printf("sdas\n");
+                        sem_post(&dataThread);
+                        printf("we ready to liberate the thread");
+                        sem_post(&semExCF);
+                        printf("sdas\n");
+                        printf("we liberate the calcualte thread\n");
+                        inactivethreads--;
                     }else{
-                        calculateForce(tree->children[i],shrdBuff,localBuff,index, PendingThreads);
+                        pthread_mutex_unlock(&controlThreads);
+                        calculateForce(tree->children[i],shrdBuff,localBuff,index);
                     }
-
+                    pthread_mutex_unlock(&controlThreads);
                 }
             }
-            for (int c = 0; c < NewThreads; c++)
-            {
-                if (pthread_join(MiTids[c], NULL)!=0)
-                    perror("Error join.");
-
-            }
         }
+        sem_post(&semEnded);
     }
 }
 
-void *calculateForcesThread(MIFORCE data)
+void *calculateForcesThread()
 {
-    calculateForce(data->node,data->shrdBuff,data->localBuff,data->index, data->MThreads);
-    return NULL;
+    while(1){
+        sem_wait(&semExCF);
+        printf("Liberated\n");
+        TNForcesJob data;
+        sem_wait(&dataThread);
+        data = data_sem;
+        sem_post(&dataThread);
+        calculateForce(data.node,data.shrdBuff,data.localBuff,data.index);
+    }
 }
+
 void moveParticle(double *shrdBuff, double *localBuff, int index){
     //Unprecise but fast euler method for solving the time differential equation
     double oldX=shrdBuff[PX(index)];
@@ -479,7 +464,6 @@ void ReadGalaxyFile(char *filename, int *nShared, int **indexes, double **shared
         }
         //printf("Body %d: (%le,%le) %le\n", ind,(*sharedBuff)[PX((*indexes)[i])],(*sharedBuff)[PY((*indexes)[i])],(*sharedBuff)[MASS((*indexes)[i])]);
     }
-
     fclose(input);
 }
 
@@ -509,7 +493,15 @@ void ShowWritePartialResults(int count,int nOriginal, int nShared, int *indexes,
 }
 
 
+void createThreads(int n){
 
+    for(int i = 0; i < n; i ++){
+        if ((pthread_create(&(GeneralThreads[i]), NULL, (void *(*)(void *)) calculateForcesThread, NULL)) !=
+            0) {
+            perror("Error crear hilo.");
+        }
+    }
+}
 int main(int argc, char *argv[]){
     int nShared=500;
     int steps=100;
@@ -518,22 +510,25 @@ int main(int argc, char *argv[]){
     double *radius;
     int *indexes, i;
     char filename[100];
-    int Mthreads = atoi(argv[5]);
-    if(Mthreads < 4)
-    {
-        Mthreads = 4;
-    }
+    sem_init(&semExCF, 1, 0);
+    sem_init(&dataThread, 1, 1);
+    sem_init(&semEnded, 1, 0);
+    Mthreads = 1;
+    GeneralThreads = malloc(sizeof(pthread_t) * Mthreads);
     printf("NBody with %d arguments.\n",argc);
     StartTime = clock();
-    printf("asdas ");
+    pthread_mutex_init(&controlThreads, NULL);
     if(argc>1){
         nShared=atoi(argv[1]);
-
         if(argc>2){
             steps=atoi(argv[2]);
         }
     }
-    printf("asdas ");
+    Mthreads = atoi(argv[5]);
+    pthread_mutex_lock(&controlThreads);
+    inactivethreads = Mthreads;
+    pthread_mutex_unlock(&controlThreads);
+    createThreads(Mthreads);
     if(argc>3 && access(argv[3], F_OK) == 0)
     {
         printf("Read file..\n");
@@ -626,7 +621,7 @@ int main(int argc, char *argv[]){
 
 			double t=glfwGetTime();
 			//We build the tree, which needs a pointer to the initial node, the buffer holding position and mass of the particles, indexes and number of particles
-        	buildTree(tree,sharedBuff,indexes,nShared, atoi(argv[5]));
+        	buildTree(tree,sharedBuff,indexes,nShared, Mthreads);
         	//Now that it is built, we calculate the forces per particle
 			for(i=0;i<nLocal;i++){
 				//First we make them zero in both directions
@@ -635,9 +630,15 @@ int main(int argc, char *argv[]){
             	int s;
             	for(s=0;s<4;s++){
 					//Now, for each children that is not empty, we calculate the force (the calculateForce() function is recursive)
-                	if(tree->children[s]!=NULL)
-                		calculateForce(tree->children[s],sharedBuff,localBuff,indexes[i], atoi(argv[5]));
+                	if(tree->children[s]!=NULL){
+                        calculateForce(tree->children[s],sharedBuff,localBuff,indexes[i]);
+                    }
             	}
+                printf("we wait jobs end their joibs\n");
+                for(int i = 0; i < Mthreads; i++){
+                    sem_wait(&semEnded);
+                }
+                printf("threads ended their jobs\n");
 				//We calculate the new position of the particles according to the accelerations
             	moveParticle(sharedBuff,localBuff,indexes[i]);
 				//This is to kick out particles that escape the rectangle (0,1)x(0,1), so we just delete the index.
@@ -681,7 +682,7 @@ int main(int argc, char *argv[]){
     //system("mkdir res");
     while(count<=steps){
         //First we build the tree
-        buildTree(tree,sharedBuff,indexes,nShared, atoi(argv[5]));
+        buildTree(tree,sharedBuff,indexes,nShared, Mthreads);
         for(i=0;i<nLocal;i++){
             //Set initial accelerations to zero
             localBuff[AX(indexes[i])]=0;
@@ -689,9 +690,15 @@ int main(int argc, char *argv[]){
             int s;
             for(s=0;s<4;s++){
                 //Recursively calculate accelerations
-                if(tree->children[s]!=NULL)
-                    calculateForce(tree->children[s],sharedBuff,localBuff,indexes[i], atoi(argv[5]));
+                if(tree->children[s]!=NULL){
+                    printf("Enter calculate forces\n");
+                    calculateForce(tree->children[s],sharedBuff,localBuff,indexes[i]);
+                }
             }
+            printf("we wait jobs end their joibs\n");
+            sem_wait(&semEnded);
+            printf("threads ended their jobs\n");
+
             //Calculate new position
             moveParticle(sharedBuff,localBuff,indexes[i]);
             //Kick out particle if it went out of the box (0,1)x(0,1)
