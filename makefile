@@ -1,5 +1,5 @@
 #make file for my serial version of the project
-BUILD := no_gui
+BUILD := gui
 
 CC=gcc
 
