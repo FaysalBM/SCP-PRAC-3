@@ -72,10 +72,22 @@ int inactivethreads = 0;
 
 pthread_t *GeneralThreads;
 pthread_mutex_t controlID = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t controlIts = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t controlThreads = PTHREAD_MUTEX_INITIALIZER;
 sem_t semExCF;
 sem_t dataThread;
 sem_t semEnded;
+int rangeIt;
+int currentIT = 0;
+int iterationsMade = 0;
+int enteredPArts = 0;
+clock_t Starttime;
+double CurrentTime;
+double TimeSpent;
+int get_itNumber(){
+    return currentIT;
+}
+
 
 void buildTree(struct Node* node, double* shrdBuff, int *indexes, int n, int MThreads){
 
@@ -300,13 +312,18 @@ void *buildTreeThread(MIJOB data)
 }
 
 void calculateForce(struct Node *tree, double *shrdBuff, double *localBuff, int index){
-    printf("Entered calculate forces\n");
+    //printf("Entered calculate forces\n");
     double distance = sqrt((tree->CMX-shrdBuff[PX(index)])*(tree->CMX-shrdBuff[PX(index)])+
                            (tree->CMY-shrdBuff[PY(index)])*(tree->CMY-shrdBuff[PY(index)]));
     pthread_t *MiTids = NULL;
     TNForcesJob data_thread;
     int Jobs=0, NewThreads=0, RemainingThreads=0, PendingThreads=0, CurrentJob=0;
     //First we check if the node is not actually the same particle we are calculating
+
+    if(currentIT == (25 + iterationsMade)){
+        printf("Time: [%.3f], Particles deleted: %i, Particles analized: %i\n", TimeSpent, index, index);
+        iterationsMade = currentIT;
+    }
     if(distance>0){
         //Now, we know it is not because the is some distance between the Center of Mass and the particle
         //If the node is external (only contains one particle) or is far away enough, we calculate the force with the center of mass
@@ -324,31 +341,35 @@ void calculateForce(struct Node *tree, double *shrdBuff, double *localBuff, int 
             int i;
             for(i=0;i<4;i++){
                 if(tree->children[i]!=NULL){
-                    printf("pso\n");
+                    //printf("pso\n");
                     pthread_mutex_lock(&controlThreads);
                     if(inactivethreads > 0){
-                        printf("As theres threads doing nothing, we enter and set data to liberate the threads\n");
+                        //printf("As theres threads doing nothing, we enter and set data to liberate the threads\n");
                         sem_wait(&dataThread);
-                        printf("sdas\n");
+                        //printf("sdas\n");
                         data_sem.index = index;
                         data_sem.localBuff = localBuff;
                         data_sem.shrdBuff = shrdBuff;
                         data_sem.node = tree->children[i];
-                        printf("sdas\n");
+                        //printf("sdas\n");
                         sem_post(&dataThread);
-                        printf("we ready to liberate the thread");
+                        //printf("we ready to liberate the thread");
                         sem_post(&semExCF);
-                        printf("sdas\n");
-                        printf("we liberate the calcualte thread\n");
+                        //printf("sdas\n");
+                        //printf("we liberate the calcualte thread\n");
                         inactivethreads--;
+                        pthread_mutex_unlock(&controlThreads);
                     }else{
                         pthread_mutex_unlock(&controlThreads);
                         calculateForce(tree->children[i],shrdBuff,localBuff,index);
                     }
-                    pthread_mutex_unlock(&controlThreads);
+
                 }
             }
         }
+        pthread_mutex_lock(&controlThreads);
+        inactivethreads++;
+        pthread_mutex_unlock(&controlThreads);
         sem_post(&semEnded);
     }
 }
@@ -357,12 +378,13 @@ void *calculateForcesThread()
 {
     while(1){
         sem_wait(&semExCF);
-        printf("Liberated\n");
+        CurrentTime = clock();
         TNForcesJob data;
         sem_wait(&dataThread);
         data = data_sem;
         sem_post(&dataThread);
         calculateForce(data.node,data.shrdBuff,data.localBuff,data.index);
+        TimeSpent = (double) (CurrentTime - Starttime) / CLOCKS_PER_SEC;
     }
 }
 
@@ -446,7 +468,6 @@ void ReadGalaxyFile(char *filename, int *nShared, int **indexes, double **shared
         exit(1);
     }
 
-
     printf("Reading %d bodies\n",*nShared);
 
     // Reserve memory for indexes and particles.
@@ -488,7 +509,13 @@ void ShowWritePartialResults(int count,int nOriginal, int nShared, int *indexes,
         TimeSpent = (double)(CurrentTime - StartTime) / CLOCKS_PER_SEC;
         //Mins = (int)TimeSpent/60;
         //Secs = (TimeSpent-(Mins*60));
+        pthread_mutex_lock(&controlIts);
+        currentIT++;
+        pthread_mutex_unlock(&controlIts);
         printf("[%.3f] Iteration %d => %d Bodies (%d) \t(Body %d: (%le, %le) %le).\n",TimeSpent, count, nShared, nOriginal, i, sharedBuff[PX(indexes[i])],sharedBuff[PY(indexes[i])],sharedBuff[MASS(indexes[i])]);
+        if(count == rangeIt){
+
+        }
     }
 }
 
@@ -518,13 +545,16 @@ int main(int argc, char *argv[]){
     printf("NBody with %d arguments.\n",argc);
     StartTime = clock();
     pthread_mutex_init(&controlThreads, NULL);
+    pthread_mutex_init(&controlIts, NULL);
     if(argc>1){
         nShared=atoi(argv[1]);
         if(argc>2){
             steps=atoi(argv[2]);
         }
     }
+    enteredPArts = atoi(argv[1]);
     Mthreads = atoi(argv[5]);
+    rangeIt = atoi(argv[6]);
     pthread_mutex_lock(&controlThreads);
     inactivethreads = Mthreads;
     pthread_mutex_unlock(&controlThreads);
@@ -634,11 +664,9 @@ int main(int argc, char *argv[]){
                         calculateForce(tree->children[s],sharedBuff,localBuff,indexes[i]);
                     }
             	}
-                printf("we wait jobs end their joibs\n");
                 for(int i = 0; i < Mthreads; i++){
                     sem_wait(&semEnded);
                 }
-                printf("threads ended their jobs\n");
 				//We calculate the new position of the particles according to the accelerations
             	moveParticle(sharedBuff,localBuff,indexes[i]);
 				//This is to kick out particles that escape the rectangle (0,1)x(0,1), so we just delete the index.
@@ -695,9 +723,7 @@ int main(int argc, char *argv[]){
                     calculateForce(tree->children[s],sharedBuff,localBuff,indexes[i]);
                 }
             }
-            printf("we wait jobs end their joibs\n");
             sem_wait(&semEnded);
-            printf("threads ended their jobs\n");
 
             //Calculate new position
             moveParticle(sharedBuff,localBuff,indexes[i]);
